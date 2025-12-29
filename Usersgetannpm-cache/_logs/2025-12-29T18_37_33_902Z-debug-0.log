@@ -1,0 +1,36 @@
+0 verbose cli C:\Program Files\nodejs\node.exe C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@10.9.2
+2 info using node@v22.14.0
+3 silly config load:file:C:\Program Files\nodejs\node_modules\npm\npmrc
+4 silly config load:file:C:\Users\getan\Documents\virtual_tryon_project\.npmrc
+5 silly config load:file:C:\Users\getan\.npmrc
+6 silly config load:file:C:\Users\getan\AppData\Roaming\npm\etc\npmrc
+7 verbose title npm exec create-next-app@latest frontend
+8 verbose argv "exec" "--" "create-next-app@latest" "frontend"
+9 verbose logfile logs-max:10 dir:C:\Users\getan\Documents\virtual_tryon_project\Usersgetannpm-cache\_logs\2025-12-29T18_37_33_902Z-
+10 verbose logfile C:\Users\getan\Documents\virtual_tryon_project\Usersgetannpm-cache\_logs\2025-12-29T18_37_33_902Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:2197815296 maxSize:549453824 maxEntrySize:274726912
+13 http fetch GET 200 https://registry.npmjs.org/create-next-app 7771ms (cache miss)
+14 silly packumentCache heap:2197815296 maxSize:549453824 maxEntrySize:274726912
+15 verbose Could not read global path D:\npm-global, ignoring
+16 silly packumentCache heap:2197815296 maxSize:549453824 maxEntrySize:274726912
+17 silly idealTree buildDeps
+18 silly fetch manifest create-next-app@16.1.1
+19 silly packumentCache full:https://registry.npmjs.org/create-next-app cache-miss
+20 http fetch GET 200 https://registry.npmjs.org/create-next-app 10921ms (cache miss)
+21 silly packumentCache full:https://registry.npmjs.org/create-next-app set size:undefined disposed:false
+22 silly placeDep ROOT create-next-app@16.1.1 OK for:  want: 16.1.1
+23 silly reify moves {}
+24 silly audit bulk request { 'create-next-app': [ '16.1.1' ] }
+25 http cache create-next-app@https://registry.npmjs.org/create-next-app/-/create-next-app-16.1.1.tgz 0ms (cache hit)
+26 silly tarball no local data for create-next-app@https://registry.npmjs.org/create-next-app/-/create-next-app-16.1.1.tgz. Extracting by manifest.
+27 http fetch POST 200 https://registry.npmjs.org/-/npm/v1/security/advisories/bulk 487ms
+28 silly audit report {}
+29 http fetch GET 200 https://registry.npmjs.org/create-next-app/-/create-next-app-16.1.1.tgz 2065ms (cache miss)
+30 verbose cwd C:\Users\getan\Documents\virtual_tryon_project
+31 verbose os Windows_NT 10.0.22631
+32 verbose node v22.14.0
+33 verbose npm  v10.9.2
+34 verbose exit 0
+35 info ok

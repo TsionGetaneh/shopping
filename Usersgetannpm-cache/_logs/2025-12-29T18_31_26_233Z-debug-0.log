@@ -1,0 +1,46 @@
+0 verbose cli C:\Program Files\nodejs\node.exe C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@10.9.2
+2 info using node@v22.14.0
+3 silly config load:file:C:\Program Files\nodejs\node_modules\npm\npmrc
+4 silly config load:file:C:\Users\getan\Documents\virtual_tryon_project\.npmrc
+5 silly config load:file:C:\Users\getan\.npmrc
+6 silly config load:file:C:\Users\getan\AppData\Roaming\npm\etc\npmrc
+7 verbose title npm exec create-next-app-latest frontend
+8 verbose argv "exec" "--" "create-next-app-latest" "frontend"
+9 verbose logfile logs-max:10 dir:C:\Users\getan\Documents\virtual_tryon_project\Usersgetannpm-cache\_logs\2025-12-29T18_31_26_233Z-
+10 verbose logfile C:\Users\getan\Documents\virtual_tryon_project\Usersgetannpm-cache\_logs\2025-12-29T18_31_26_233Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:2197815296 maxSize:549453824 maxEntrySize:274726912
+13 http fetch GET https://registry.npmjs.org/npm attempt 1 failed with ENOTFOUND
+14 http fetch GET https://registry.npmjs.org/create-next-app-latest attempt 1 failed with ENOTFOUND
+15 http fetch GET https://registry.npmjs.org/create-next-app-latest attempt 2 failed with ENOTFOUND
+16 http fetch GET https://registry.npmjs.org/npm attempt 2 failed with ENOTFOUND
+17 http fetch GET 404 https://registry.npmjs.org/create-next-app-latest 136447ms attempt #3 (cache skip)
+18 http fetch GET 404 https://registry.npmjs.org/create-next-app-latest 815ms (cache skip)
+19 verbose stack HttpErrorGeneral: 404 Not Found - GET https://registry.npmjs.org/create-next-app-latest - Not found
+19 verbose stack     at C:\Program Files\nodejs\node_modules\npm\node_modules\npm-registry-fetch\lib\check-response.js:103:15
+19 verbose stack     at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+19 verbose stack     at async RegistryFetcher.packument (C:\Program Files\nodejs\node_modules\npm\node_modules\pacote\lib\registry.js:90:19)
+19 verbose stack     at async RegistryFetcher.manifest (C:\Program Files\nodejs\node_modules\npm\node_modules\pacote\lib\registry.js:128:23)
+19 verbose stack     at async getManifest (C:\Program Files\nodejs\node_modules\npm\node_modules\libnpmexec\lib\index.js:27:22)
+19 verbose stack     at async missingFromTree (C:\Program Files\nodejs\node_modules\npm\node_modules\libnpmexec\lib\index.js:60:22)
+19 verbose stack     at async C:\Program Files\nodejs\node_modules\npm\node_modules\libnpmexec\lib\index.js:182:32
+19 verbose stack     at async Promise.all (index 0)
+19 verbose stack     at async exec (C:\Program Files\nodejs\node_modules\npm\node_modules\libnpmexec\lib\index.js:180:3)
+19 verbose stack     at async Npm.exec (C:\Program Files\nodejs\node_modules\npm\lib\npm.js:207:9)
+20 verbose statusCode 404
+21 verbose pkgid create-next-app-latest@*
+22 error code E404
+23 error 404 Not Found - GET https://registry.npmjs.org/create-next-app-latest - Not found
+24 error 404
+25 error 404  'create-next-app-latest@*' is not in this registry.
+26 error 404
+27 error 404 Note that you can also install from a
+28 error 404 tarball, folder, http url, or git url.
+29 verbose cwd C:\Users\getan\Documents\virtual_tryon_project
+30 verbose os Windows_NT 10.0.22631
+31 verbose node v22.14.0
+32 verbose npm  v10.9.2
+33 verbose exit 1
+34 verbose code 1
+35 error A complete log of this run can be found in: C:\Users\getan\Documents\virtual_tryon_project\Usersgetannpm-cache\_logs\2025-12-29T18_31_26_233Z-debug-0.log
