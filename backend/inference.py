@@ -1,212 +1,585 @@
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter, ImageEnhance
 import os
 import sys
+import torch
+import torch.nn.functional as F
+
+# Add cp-vton to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'cp-vton'))
+try:
+    from networks import GMM
+    from utils.image_utils import preprocess_image, tensor_to_image
+    HAS_GMM = True
+except ImportError:
+    HAS_GMM = False
+    print("[WARN] CP-VTON modules not available, using geometric warping only")
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Global GMM model
+GMM_model = None
+GMM_MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "GMM.pth")
+
+def load_gmm_model():
+    """Load GMM model for garment warping"""
+    global GMM_model
+    if GMM_model is not None:
+        return True
+    
+    if not HAS_GMM or not os.path.exists(GMM_MODEL_PATH):
+        return False
+    
+    try:
+        class Opt:
+            def __init__(self):
+                self.fine_height = 256
+                self.fine_width = 192
+                self.grid_size = 5
+        
+        opt = Opt()
+        GMM_model = GMM(opt, cloth_channels=1).to(device)
+        state_dict = torch.load(GMM_MODEL_PATH, map_location=device)
+        GMM_model.load_state_dict(state_dict)
+        GMM_model.eval()
+        print("[OK] GMM model loaded for garment warping")
+        return True
+    except Exception as e:
+        print(f"[WARN] Failed to load GMM model: {e}")
+        return False
 
 def detect_human_pose_and_shape(person_img):
-    """Step 1: Human body understanding - pose estimation and body parsing"""
+    """
+    Step 1: Detect human body pose, silhouette, and key points
+    Returns keypoints dict and body segmentation masks
+    """
     w, h = person_img.size
-    person_array = np.array(person_img)
+    person_array = np.array(person_img.convert('RGB'))
     
-    # Body key points detection
+    # Convert to grayscale for processing
+    gray = cv2.cvtColor(person_array, cv2.COLOR_RGB2GRAY)
+    
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # Use adaptive thresholding to detect person silhouette
+    thresh = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                   cv2.THRESH_BINARY_INV, 11, 2)
+    
+    # Find contours to detect person
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if contours:
+        # Get largest contour (person)
+        main_contour = max(contours, key=cv2.contourArea)
+        x, y, w_rect, h_rect = cv2.boundingRect(main_contour)
+        center_x = x + w_rect // 2
+    else:
+        # Fallback to image center
+        x, y, w_rect, h_rect = w // 4, h // 8, w // 2, 3 * h // 4
+        center_x = w // 2
+    
+    # Extract key points based on body proportions
     keypoints = {
-        'head_top': (w // 2, h // 8),
-        'neck': (w // 2, h // 5),
-        'left_shoulder': (w // 3, h // 4),
-        'right_shoulder': (2 * w // 3, h // 4),
-        'chest_center': (w // 2, h // 2),
-        'waist': (w // 2, 3 * h // 5),
-        'left_hip': (w // 3, 4 * h // 5),
-        'right_hip': (2 * w // 3, 4 * h // 5),
-        'left_wrist': (w // 6, 3 * h // 5),
-        'right_wrist': (5 * w // 6, 3 * h // 5)
+        'head_top': (center_x, y + h_rect // 12),
+        'neck': (center_x, y + h_rect // 4),
+        'left_shoulder': (x + w_rect // 3, y + h_rect // 4),
+        'right_shoulder': (x + 2 * w_rect // 3, y + h_rect // 4),
+        'chest_center': (center_x, y + h_rect // 2),
+        'waist': (center_x, y + 3 * h_rect // 5),
+        'left_hip': (x + w_rect // 3, y + 4 * h_rect // 5),
+        'right_hip': (x + 2 * w_rect // 3, y + 4 * h_rect // 5),
+        'left_elbow': (x + w_rect // 4, y + h_rect // 2),
+        'right_elbow': (x + 3 * w_rect // 4, y + h_rect // 2),
+        'left_wrist': (x + w_rect // 5, y + 3 * h_rect // 4),
+        'right_wrist': (x + 4 * w_rect // 5, y + 3 * h_rect // 4),
     }
     
-    # Body silhouette and segmentation masks
+    # Create body segmentation masks
     masks = {
         'face': np.zeros((h, w), dtype=np.uint8),
         'neck': np.zeros((h, w), dtype=np.uint8),
         'torso': np.zeros((h, w), dtype=np.uint8),
         'left_arm': np.zeros((h, w), dtype=np.uint8),
         'right_arm': np.zeros((h, w), dtype=np.uint8),
-        'background': np.zeros((h, w), dtype=np.uint8)
+        'upper_clothing': np.zeros((h, w), dtype=np.uint8),  # Original clothing region
     }
     
-    # Face region (protected)
-    face_h = h // 5
-    face_w = w // 3
-    masks['face'][:face_h, w//2-face_w//2:w//2+face_w//2] = 255
+    # Face region (top 20% of detected person)
+    face_y_end = y + h_rect // 5
+    face_w = w_rect // 2
+    masks['face'][y:face_y_end, center_x - face_w//2:center_x + face_w//2] = 255
     
     # Neck region
-    neck_h = h // 25
-    masks['neck'][face_h:face_h+neck_h, w//2-w//8:w//2+w//8] = 255
+    neck_y_start = face_y_end
+    neck_y_end = y + h_rect // 4
+    neck_w = w_rect // 3
+    masks['neck'][neck_y_start:neck_y_end, center_x - neck_w//2:center_x + neck_w//2] = 255
     
-    # Torso region (clothing area)
-    torso_start = face_h + neck_h
-    torso_end = 4 * h // 5
-    masks['torso'][torso_start:torso_end, :] = 255
+    # Torso region (upper body clothing area)
+    torso_y_start = neck_y_end
+    torso_y_end = y + 3 * h_rect // 4
+    torso_w = w_rect
+    masks['torso'][torso_y_start:torso_y_end, x:x + torso_w] = 255
+    masks['upper_clothing'][torso_y_start:torso_y_end, x:x + torso_w] = 255
     
-    # Arms regions
-    arm_width = w // 6
-    masks['left_arm'][:, :arm_width] = 255
-    masks['right_arm'][:, -arm_width:] = 255
+    # Arms regions (estimate based on keypoints)
+    arm_width = w_rect // 6
+    # Left arm
+    left_shoulder = keypoints['left_shoulder']
+    left_elbow = keypoints['left_elbow']
+    left_wrist = keypoints['left_wrist']
+    # Create arm mask using line between keypoints
+    cv2.line(masks['left_arm'], left_shoulder, left_elbow, 255, arm_width)
+    cv2.line(masks['left_arm'], left_elbow, left_wrist, 255, arm_width)
     
-    # Background
-    body_mask = np.zeros((h, w), dtype=np.uint8)
-    body_mask[:torso_end, :] = 255
-    masks['background'] = 255 - body_mask
+    # Right arm
+    right_shoulder = keypoints['right_shoulder']
+    right_elbow = keypoints['right_elbow']
+    right_wrist = keypoints['right_wrist']
+    cv2.line(masks['right_arm'], right_shoulder, right_elbow, 255, arm_width)
+    cv2.line(masks['right_arm'], right_elbow, right_wrist, 255, arm_width)
+    
+    # Smooth masks
+    for key in masks:
+        masks[key] = cv2.GaussianBlur(masks[key], (5, 5), 0)
+        _, masks[key] = cv2.threshold(masks[key], 127, 255, cv2.THRESH_BINARY)
     
     return keypoints, masks
 
 def create_neutral_body_base(person_img, masks):
-    """Step 2: Remove original clothing and create neutral body base"""
-    person_array = np.array(person_img)
-    neutral_base = person_array.copy().astype(np.float32)
+    """
+    Step 2: Remove original upper-body clothing and replace with neutral body base
+    """
+    person_array = np.array(person_img.convert('RGB')).astype(np.float32)
+    neutral_base = person_array.copy()
     
-    # Remove original clothing from torso only
-    torso_mask = masks['torso'] > 0
+    # Get upper clothing mask
+    upper_clothing_mask = masks['upper_clothing'] > 0
     
-    # Create neutral skin tone base for torso
+    # Extract skin tone from face/neck regions
+    face_mask = masks['face'] > 0
+    neck_mask = masks['neck'] > 0
+    skin_mask = np.logical_or(face_mask, neck_mask)
+    
+    # Calculate average skin tone
+    if np.any(skin_mask):
+        skin_tone = np.mean(person_array[skin_mask], axis=0)
+    else:
+        # Default light skin tone
+        skin_tone = np.array([220.0, 180.0, 160.0])
+    
+    # Create neutral body base with skin tone
+    # Add slight variation for realism
     for c in range(3):
-        # Get average skin tone from face/neck
-        face_mask = masks['face'] > 0
-        neck_mask = masks['neck'] > 0
-        
-        if np.any(face_mask):
-            skin_tone = np.mean(person_array[:,:,c][face_mask])
-        elif np.any(neck_mask):
-            skin_tone = np.mean(person_array[:,:,c][neck_mask])
-        else:
-            skin_tone = 200  # Default light skin tone
-        
-        # Apply neutral base to torso
-        neutral_base[:,:,c][torso_mask] = skin_tone
+        base_value = skin_tone[c]
+        # Add subtle shading variation
+        variation = np.random.normal(0, 10, neutral_base.shape[:2])
+        neutral_base[:, :, c][upper_clothing_mask] = np.clip(
+            base_value + variation[upper_clothing_mask], 0, 255
+        )
     
-    return neutral_base
+    # Smooth transition at boundaries
+    kernel = np.ones((15, 15), np.float32) / 225
+    for c in range(3):
+        neutral_base[:, :, c] = cv2.filter2D(neutral_base[:, :, c], -1, kernel)
+    
+    return neutral_base.astype(np.uint8)
 
-def geometric_warp_garment(cloth_img, keypoints):
-    """Step 3: Cloth geometry alignment - warp to match body shape"""
-    cloth_array = np.array(cloth_img)
+def extract_garment_from_cloth(cloth_img):
+    """Extract garment from cloth image by removing background"""
+    cloth_array = np.array(cloth_img.convert('RGB'))
+    h, w = cloth_array.shape[:2]
     
-    # Extract garment - FIX: better background removal
-    gray = cv2.cvtColor(cloth_array, cv2.COLOR_RGB2GRAY)
-    garment_mask = gray < 240  # More sensitive threshold
+    # Convert to LAB color space for better background removal
+    lab = cv2.cvtColor(cloth_array, cv2.COLOR_RGB2LAB)
+    l_channel = lab[:, :, 0]
     
-    if not np.any(garment_mask):
-        return None
+    # Use adaptive thresholding to separate garment from background
+    # Most garment images have white/light background
+    _, mask = cv2.threshold(l_channel, 240, 255, cv2.THRESH_BINARY_INV)
     
-    coords = np.where(garment_mask)
-    garment = cloth_array[np.min(coords[0]):np.max(coords[0])+1, 
-                         np.min(coords[1]):np.max(coords[1])+1]
+    # Morphological operations to clean up mask
+    kernel = np.ones((5, 5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     
-    # Calculate body dimensions
-    shoulder_width = keypoints['right_shoulder'][0] - keypoints['left_shoulder'][0]
+    # If mask is too small, use alternative method
+    if np.sum(mask > 0) < h * w * 0.1:
+        # Use color-based segmentation
+        gray = cv2.cvtColor(cloth_array, cv2.COLOR_RGB2GRAY)
+        _, mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+    
+    # Extract garment region
+    coords = np.where(mask > 0)
+    if len(coords[0]) > 0:
+        y_min, y_max = np.min(coords[0]), np.max(coords[0])
+        x_min, x_max = np.min(coords[1]), np.max(coords[1])
+        garment = cloth_array[y_min:y_max+1, x_min:x_max+1]
+        garment_mask = mask[y_min:y_max+1, x_min:x_max+1]
+    else:
+        # Fallback: use entire image
+        garment = cloth_array
+        garment_mask = np.ones((h, w), dtype=np.uint8) * 255
+    
+    return garment, garment_mask
+
+def geometric_warp_garment(cloth_img, keypoints, person_size):
+    """
+    Step 3: Deform and warp the target garment to match person's body geometry and pose
+    """
+    w_person, h_person = person_size
+    cloth_array = np.array(cloth_img.convert('RGB'))
+    
+    # Extract garment
+    garment, garment_mask = extract_garment_from_cloth(cloth_img)
+    garment_h, garment_w = garment.shape[:2]
+    
+    if garment_h == 0 or garment_w == 0:
+        return None, None
+    
+    # Calculate body dimensions from keypoints
+    shoulder_width = abs(keypoints['right_shoulder'][0] - keypoints['left_shoulder'][0])
     torso_height = keypoints['waist'][1] - keypoints['neck'][1]
     
-    # FIX: Simple resize and position - ensure garment appears
-    resized = cv2.resize(garment, (shoulder_width, torso_height))
+    # Ensure minimum dimensions
+    shoulder_width = max(shoulder_width, w_person // 4)
+    torso_height = max(torso_height, h_person // 3)
     
-    # Create full-size canvas with garment positioned
-    h, w = cloth_array.shape[:2]
-    result = np.zeros((h, w, 3), dtype=np.uint8)
+    # Resize garment to match body dimensions
+    warped_garment = cv2.resize(garment, (int(shoulder_width * 1.2), int(torso_height * 1.1)))
+    warped_mask = cv2.resize(garment_mask, (int(shoulder_width * 1.2), int(torso_height * 1.1)))
     
-    start_x = keypoints['left_shoulder'][0] - shoulder_width // 2
-    start_y = keypoints['neck'][1]
+    # Create perspective transformation to fit body shape
+    # Source points (garment corners)
+    src_points = np.float32([
+        [0, 0],
+        [warped_garment.shape[1], 0],
+        [warped_garment.shape[1], warped_garment.shape[0]],
+        [0, warped_garment.shape[0]]
+    ])
     
-    end_x = min(w, start_x + shoulder_width)
-    end_y = min(h, start_y + torso_height)
+    # Destination points (body shape - narrower at shoulders, wider at waist)
+    left_shoulder = keypoints['left_shoulder']
+    right_shoulder = keypoints['right_shoulder']
+    waist = keypoints['waist']
     
-    if start_x >= 0 and start_y >= 0:
-        result[start_y:end_y, start_x:end_x] = resized[:end_y-start_y, :end_x-start_x]
+    # Calculate waist width (slightly wider than shoulders for natural fit)
+    waist_width = shoulder_width * 1.1
+    left_waist = (waist[0] - waist_width // 2, waist[1])
+    right_waist = (waist[0] + waist_width // 2, waist[1])
     
-    return result
+    dst_points = np.float32([
+        [left_shoulder[0] - shoulder_width * 0.1, left_shoulder[1]],
+        [right_shoulder[0] + shoulder_width * 0.1, right_shoulder[1]],
+        [right_waist[0], right_waist[1]],
+        [left_waist[0], left_waist[1]]
+    ])
+    
+    # Calculate perspective transform
+    M = cv2.getPerspectiveTransform(src_points, dst_points)
+    
+    # Warp garment
+    warped_garment_full = cv2.warpPerspective(
+        warped_garment, M, (w_person, h_person),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255)
+    )
+    warped_mask_full = cv2.warpPerspective(
+        warped_mask, M, (w_person, h_person),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0
+    )
+    
+    return warped_garment_full, warped_mask_full
 
-def render_garment_with_depth(neutral_base, warped_garment, keypoints, masks):
-    """Step 4-7: Render garment with depth, shadows, and realistic integration"""
-    if warped_garment is None:
-        return Image.fromarray(neutral_base.astype(np.uint8))
+def warp_garment_with_gmm(cloth_img, person_img, keypoints):
+    """
+    Step 3 (Alternative): Use GMM model for advanced garment warping
+    """
+    if not load_gmm_model() or GMM_model is None:
+        return None, None
     
-    h, w = neutral_base.shape[:2]
-    result = neutral_base.copy()
+    try:
+        # Resize to GMM input size
+        person_resized = person_img.resize((192, 256), Image.BILINEAR)
+        cloth_resized = cloth_img.resize((192, 256), Image.BILINEAR)
+        
+        # Preprocess
+        person_tensor = preprocess_image(person_resized).to(device)
+        cloth_tensor = preprocess_image(cloth_resized).to(device)
+        
+        # Create agnostic representation
+        agnostic = create_agnostic_representation(person_resized, keypoints)
+        agnostic = agnostic.to(device)
+        
+        # GMM expects 1-channel cloth
+        cloth_1ch = cloth_tensor[:, 0:1, :, :]
+        
+        with torch.no_grad():
+            grid, theta = GMM_model(agnostic, cloth_1ch)
+            grid = torch.clamp(grid, -1, 1)
+            
+            # Warp cloth
+            warped_cloth = F.grid_sample(cloth_tensor, grid, padding_mode='border', align_corners=False)
+            
+            # Convert to image
+            warped_img = tensor_to_image(warped_cloth)
+            
+            # Resize back to original person size
+            w_orig, h_orig = person_img.size
+            warped_img = warped_img.resize((w_orig, h_orig), Image.LANCZOS)
+            
+            # Create mask (non-white regions are garment)
+            warped_array = np.array(warped_img)
+            mask = np.mean(warped_array, axis=2) < 250
+            mask = (mask * 255).astype(np.uint8)
+            
+            return warped_array, mask
+            
+    except Exception as e:
+        print(f"[WARN] GMM warping failed: {e}")
+        return None, None
+
+def create_agnostic_representation(person_img, keypoints):
+    """Create agnostic representation for GMM"""
+    h, w = 256, 192
+    person_array = np.array(person_img.resize((w, h), Image.BILINEAR))
     
-    # Create garment mask - FIX: more sensitive detection
-    garment_mask = np.mean(warped_garment, axis=2) > 5  # Lower threshold
+    # Shape channel (silhouette)
+    shape = np.ones((1, h, w), dtype=np.float32)
     
-    # Apply garment with proper depth ordering
+    # Head channels (preserve head region)
+    head = np.zeros((3, h, w), dtype=np.float32)
+    head_y_end = int(h * 0.25)
+    head[:, :head_y_end, :] = 1.0
+    
+    # Pose heatmaps (18 channels for 18 keypoints)
+    pose_maps = np.zeros((18, h, w), dtype=np.float32)
+    
+    # Map keypoints to pose heatmaps
+    keypoint_mapping = {
+        'neck': 1,
+        'right_shoulder': 2, 'left_shoulder': 5,
+        'right_elbow': 3, 'left_elbow': 6,
+        'right_wrist': 4, 'left_wrist': 7,
+        'right_hip': 8, 'left_hip': 11,
+        'waist': 8,  # Use hip index
+    }
+    
+    # Scale keypoints to (192, 256)
+    scale_x = w / person_img.size[0]
+    scale_y = h / person_img.size[1]
+    
+    for kp_name, idx in keypoint_mapping.items():
+        if kp_name in keypoints:
+            x, y = keypoints[kp_name]
+            x_scaled = int(x * scale_x)
+            y_scaled = int(y * scale_y)
+            
+            if 0 <= x_scaled < w and 0 <= y_scaled < h:
+                radius = 8
+                for dy in range(-radius, radius+1):
+                    for dx in range(-radius, radius+1):
+                        nx, ny = x_scaled + dx, y_scaled + dy
+                        if 0 <= nx < w and 0 <= ny < h:
+                            dist = np.sqrt(dx*dx + dy*dy)
+                            if dist <= radius:
+                                intensity = 1.0 - (dist / radius)
+                                pose_maps[idx, ny, nx] = max(pose_maps[idx, ny, nx], intensity)
+    
+    # Combine: shape (1) + head (3) + pose (18) = 22 channels
+    agnostic = np.concatenate([shape, head, pose_maps], axis=0)
+    agnostic = torch.from_numpy(agnostic).float().unsqueeze(0)
+    
+    return agnostic
+
+def anchor_garment_at_keypoints(warped_garment, warped_mask, keypoints):
+    """
+    Step 4: Anchor the garment correctly at shoulders, neckline, chest, and waist
+    """
+    h, w = warped_garment.shape[:2]
+    
+    # Ensure garment is properly positioned at key anchor points
+    neck = keypoints['neck']
+    left_shoulder = keypoints['left_shoulder']
+    right_shoulder = keypoints['right_shoulder']
+    waist = keypoints['waist']
+    
+    # Create anchor mask (regions where garment should be strong)
+    anchor_mask = np.zeros((h, w), dtype=np.float32)
+    
+    # Neckline region
+    cv2.circle(anchor_mask, (int(neck[0]), int(neck[1])), 15, 1.0, -1)
+    
+    # Shoulder regions
+    cv2.circle(anchor_mask, (int(left_shoulder[0]), int(left_shoulder[1])), 20, 1.0, -1)
+    cv2.circle(anchor_mask, (int(right_shoulder[0]), int(right_shoulder[1])), 20, 1.0, -1)
+    
+    # Chest region
+    chest = keypoints['chest_center']
+    cv2.ellipse(anchor_mask, (int(chest[0]), int(chest[1])), (30, 20), 0, 0, 360, 1.0, -1)
+    
+    # Waist region
+    cv2.ellipse(anchor_mask, (int(waist[0]), int(waist[1])), (40, 15), 0, 0, 360, 1.0, -1)
+    
+    # Enhance garment at anchor points
+    warped_mask = np.maximum(warped_mask.astype(np.float32) / 255.0, anchor_mask * 0.5)
+    warped_mask = (np.clip(warped_mask, 0, 1) * 255).astype(np.uint8)
+    
+    return warped_garment, warped_mask
+
+def add_realistic_shadows_and_folds(garment_array, mask, keypoints):
+    """
+    Step 7: Add realistic shadows, folds, and lighting to integrate garment naturally
+    """
+    h, w = garment_array.shape[:2]
+    
+    # Create shadow map based on body geometry
+    shadow_map = np.ones((h, w), dtype=np.float32)
+    
+    # Shadows under arms
+    left_shoulder = keypoints['left_shoulder']
+    right_shoulder = keypoints['right_shoulder']
+    
+    # Create gradient shadows
     for y in range(h):
         for x in range(w):
-            if garment_mask[y, x]:
-                # Check occlusion - arms in front
-                left_arm_mask = masks['left_arm'] > 0
-                right_arm_mask = masks['right_arm'] > 0
+            if mask[y, x] > 0:
+                # Shadow intensity based on distance from center
+                center_x = w // 2
+                dist_from_center = abs(x - center_x) / (w // 2)
                 
-                if not (left_arm_mask[y, x] or right_arm_mask[y, x]):
-                    # Garment is visible - REPLACE original
-                    garment_pixel = warped_garment[y, x]
-                    
-                    # Check if this is actual garment (not background)
-                    if np.mean(garment_pixel) < 250:  # Not white background
-                        base_pixel = result[y, x]
-                        
-                        # Lighting matching for realism
-                        base_brightness = np.mean(base_pixel)
-                        garment_brightness = np.mean(garment_pixel)
-                        
-                        if garment_brightness > 5:
-                            lighting_factor = base_brightness / garment_brightness
-                            lighting_factor = min(1.4, max(0.6, lighting_factor))
-                            
-                            # Apply lighting
-                            final_pixel = garment_pixel * lighting_factor
-                            
-                            # Add realistic shadows
-                            shadow_factor = 0.95
-                            final_pixel = final_pixel * shadow_factor
-                            
-                            result[y, x] = final_pixel
+                # Darker on sides (under arms)
+                shadow_intensity = 0.85 + 0.15 * (1 - dist_from_center)
+                
+                # Additional shadow at waist (fabric folds)
+                waist_y = keypoints['waist'][1]
+                if abs(y - waist_y) < 30:
+                    shadow_intensity *= 0.92
+                
+                shadow_map[y, x] = shadow_intensity
     
-    # Preserve face and arms
-    face_mask = masks['face'] > 0
-    left_arm_mask = masks['left_arm'] > 0
-    right_arm_mask = masks['right_arm'] > 0
+    # Apply shadows to garment
+    for c in range(3):
+        garment_array[:, :, c] = (garment_array[:, :, c].astype(np.float32) * shadow_map).astype(np.uint8)
+    
+    # Add subtle fabric texture (noise)
+    noise = np.random.normal(0, 3, (h, w, 3))
+    garment_array = np.clip(garment_array.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+    
+    return garment_array
+
+def render_garment_with_depth(neutral_base, warped_garment, warped_mask, keypoints, masks):
+    """
+    Steps 5-6: Render garment as fully opaque with correct depth ordering
+    """
+    if warped_garment is None or warped_mask is None:
+        return Image.fromarray(neutral_base)
+    
+    h, w = neutral_base.shape[:2]
+    result = neutral_base.copy().astype(np.float32)
+    
+    # Ensure warped garment and mask match base size
+    if warped_garment.shape[:2] != (h, w):
+        warped_garment = cv2.resize(warped_garment, (w, h))
+    if warped_mask.shape != (h, w):
+        warped_mask = cv2.resize(warped_mask, (w, h))
+    
+    # Anchor garment at keypoints
+    warped_garment, warped_mask = anchor_garment_at_keypoints(warped_garment, warped_mask, keypoints)
+    
+    # Add realistic shadows and folds
+    warped_garment = add_realistic_shadows_and_folds(warped_garment, warped_mask, keypoints)
+    
+    # Create final garment mask (fully opaque where garment exists)
+    garment_mask = (warped_mask > 128).astype(np.float32)
+    
+    # Get arm masks for depth ordering
+    left_arm_mask = (masks['left_arm'] > 0).astype(np.float32)
+    right_arm_mask = (masks['right_arm'] > 0).astype(np.float32)
+    arms_mask = np.maximum(left_arm_mask, right_arm_mask)
+    
+    # Depth ordering: arms in front of garment
+    # Where arms overlap garment, keep original arms
+    # Where garment doesn't overlap arms, apply garment
+    
+    # Garment regions not occluded by arms
+    garment_visible = garment_mask * (1 - arms_mask)
+    
+    # Apply garment (fully opaque, no transparency)
+    for c in range(3):
+        result[:, :, c] = (
+            result[:, :, c] * (1 - garment_visible) +
+            warped_garment[:, :, c] * garment_visible
+        )
+    
+    # Preserve face and neck (never replace)
+    face_mask = (masks['face'] > 0).astype(np.float32)
+    neck_mask = (masks['neck'] > 0).astype(np.float32)
+    preserve_mask = np.maximum(face_mask, neck_mask)
     
     for c in range(3):
-        result[:,:,c][face_mask] = neutral_base[:,:,c][face_mask]
-        result[:,:,c][left_arm_mask] = neutral_base[:,:,c][left_arm_mask]
-        result[:,:,c][right_arm_mask] = neutral_base[:,:,c][right_arm_mask]
+        result[:, :, c] = (
+            neutral_base[:, :, c] * preserve_mask +
+            result[:, :, c] * (1 - preserve_mask)
+        )
     
     # Apply bilateral filter for realistic fabric texture
-    result = cv2.bilateralFilter(result.astype(np.uint8), 3, 60, 60)
+    result = cv2.bilateralFilter(result.astype(np.uint8), 5, 80, 80)
     
-    return Image.fromarray(result.astype(np.uint8))
+    return Image.fromarray(result)
 
 def generate_tryon(person_path, cloth_path, output_path):
-    """Complete VITON pipeline - all 8 steps implemented"""
+    """
+    Complete virtual try-on pipeline - all 8 steps implemented
+    """
     try:
         # Load images
         person_img = Image.open(person_path).convert("RGB")
         cloth_img = Image.open(cloth_path).convert("RGB")
         
-        # Step 1: Human body understanding
+        print("[*] Step 1: Detecting human body pose, silhouette, and key points...")
         keypoints, masks = detect_human_pose_and_shape(person_img)
         
-        # Step 2: Remove original clothing and create neutral base
+        print("[*] Step 2: Removing original clothing and creating neutral body base...")
         neutral_base = create_neutral_body_base(person_img, masks)
         
-        # Step 3: Geometric warping of garment
-        warped_garment = geometric_warp_garment(cloth_img, keypoints)
+        print("[*] Step 3: Deforming and warping garment to match body geometry...")
+        # Try GMM warping first, fallback to geometric warping
+        warped_garment, warped_mask = warp_garment_with_gmm(cloth_img, person_img, keypoints)
         
-        # Step 4-7: Render with depth, shadows, and realistic integration
-        final_result = render_garment_with_depth(neutral_base, warped_garment, keypoints, masks)
+        if warped_garment is None:
+            warped_garment, warped_mask = geometric_warp_garment(cloth_img, keypoints, person_img.size)
         
-        # Step 8: Output ONLY final photorealistic image
-        final_result.save(output_path, 'JPEG', quality=95)
+        if warped_garment is None:
+            print("[ERROR] Failed to warp garment")
+            result_img = Image.fromarray(neutral_base)
+        else:
+            print("[*] Step 4: Anchoring garment at key points...")
+            print("[*] Step 5-6: Rendering garment with depth ordering...")
+            print("[*] Step 7: Adding realistic shadows, folds, and lighting...")
+            result_img = render_garment_with_depth(
+                neutral_base, warped_garment, warped_mask, keypoints, masks
+            )
+        
+        print("[*] Step 8: Outputting final photorealistic image...")
+        # Ensure RGB mode
+        if result_img.mode != 'RGB':
+            result_img = result_img.convert('RGB')
+        
+        # Save with high quality
+        result_img.save(output_path, 'JPEG', quality=95)
+        print(f"[OK] Virtual try-on complete: {output_path}")
         return output_path
         
     except Exception as e:
-        print(f"Pipeline error: {e}")
+        print(f"[ERROR] Pipeline error: {e}")
+        import traceback
+        traceback.print_exc()
         # Fallback: return original person
         person_img = Image.open(person_path).convert("RGB")
         person_img.save(output_path, 'JPEG', quality=95)
         return output_path
+
+# Load GMM model on import
+load_gmm_model()
