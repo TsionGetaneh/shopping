@@ -1,5 +1,5 @@
 from flask import Flask, request, send_file, render_template_string, jsonify
-from inference import generate_tryon
+from inference_test import generate_tryon
 import os
 import glob
 
